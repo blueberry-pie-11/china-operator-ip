@@ -5,6 +5,7 @@ operators:
   china:
     country: 'CN'
     pattern: ''
+    origin_only: true
     exclude_asn:
       - '7586'
       - '7721'
@@ -25,10 +26,14 @@ operators:
       - '60666'
       - '64021'
       - '132203'
+      # issue #59: CN-registered ASNs observed originating only overseas prefixes
+      # in the local RIB snapshot
+      - '133846'
       - '134413'
       - '134478'
       - '138545'
       - '139317'
+      - '139589'
       - '140633'
       - '140709'
       - '140731'
@@ -51,6 +56,7 @@ operators:
       - '151673'
       - '151782'
       - '151785'
+      - '153725'
       - '197433'
       - '197626'
       - '197856'
@@ -105,6 +111,7 @@ operators:
       - '206919'
       - '207338'
       - '207401'
+      - '207615'
       - '208266'
       - '208618'
       - '208680'

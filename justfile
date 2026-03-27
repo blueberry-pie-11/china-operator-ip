@@ -1,5 +1,5 @@
 set unstable
-bgptools_version := "0.3.0"
+bgptools_version := "0.3.1"
 
 default: prepare all stat
 
@@ -95,14 +95,19 @@ get_asn operator:
 gen operator:
   #!/usr/bin/env ruby
   require "fileutils"
+  require "yaml"
 
   operator = "{{operator}}"
   FileUtils.mkdir_p("result")
   out, v4, v6 = %W[result/#{operator}46.txt result/#{operator}.txt result/#{operator}6.txt]
+  cfg = YAML.load_file("operators.yaml").fetch("operators").fetch(operator)
+  origin_only = cfg.fetch("origin_only", false)
 
   ribs = Dir["rib-*.{gz,bz2}"].sort
   abort("No rib-*.gz or rib-*.bz2 files found. Run 'just prepare_ribs' first.") if ribs.empty?
-  bgptools = ["bgptools", "--ignore-private-asn", "--cache"] + ribs.flat_map { |r| ["--mrt-file", r] }
+  bgptools = ["bgptools", "--ignore-private-asn", "--cache"]
+  bgptools << "--origin-only" if origin_only
+  bgptools += ribs.flat_map { |r| ["--mrt-file", r] }
 
   warn "INFO> #{operator} start"
   asns = IO.popen(["just", "get_asn", operator], &:read)
