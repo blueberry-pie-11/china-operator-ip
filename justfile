@@ -1,5 +1,5 @@
 set unstable
-bgptools_version := "0.3.1"
+bgptools_version := "0.3.2"
 
 default: prepare all stat
 
@@ -65,8 +65,8 @@ prepare_ribs: (prepare_rib "rrc00") (prepare_rib "rrc21") (prepare_rib "rrc12") 
 [parallel]
 prepare: prepare_autnums prepare_ribs
 
-# Print ASN list for OPERATOR based on operators.yaml
-get_asn operator:
+# Print raw ASN candidates for OPERATOR based on operators.yaml
+get_asn_candidates_raw operator:
   #!/usr/bin/env ruby
   require "yaml"
 
@@ -76,7 +76,6 @@ get_asn operator:
 
   op = YAML.load_file(cfg).fetch("operators").fetch("{{operator}}")
   country = op.fetch("country")
-  exclude_asn = op.fetch("exclude_asn", []).map(&:to_s)
   pattern_re = Regexp.new(op["pattern"].to_s, Regexp::IGNORECASE)
   exclude_re = Regexp.new(op.fetch("exclude", "^$"), Regexp::IGNORECASE)
 
@@ -85,11 +84,152 @@ get_asn operator:
     match = line.match(/^AS(\d+)\b.*,\s*([A-Z]{2})$/)
     asn, line_country = match&.captures
     next unless line_country == country
-    next if exclude_asn.include?(asn)
     next unless pattern_re.match?(line)
     next if exclude_re.match?(line)
     puts asn
   end
+
+# Print static ASN candidates for OPERATOR based on operators.yaml
+get_asn_candidates operator:
+  #!/usr/bin/env ruby
+  require "set"
+  require "yaml"
+
+  operator = "{{operator}}"
+  cfg = YAML.load_file("operators.yaml").fetch("operators").fetch(operator)
+  exclude_asn = cfg.fetch("exclude_asn", []).map(&:to_s).to_set
+
+  candidate_asns = IO.popen(["just", "get_asn_candidates_raw", operator], &:read).split
+  abort("Failed to get raw ASN candidates for #{operator}") unless $?.success?
+
+  candidate_asns.each do |asn|
+    puts asn unless exclude_asn.include?(asn)
+  end
+
+# Print ASN list for OPERATOR based on operators.yaml
+get_asn operator:
+  #!/usr/bin/env ruby
+  require "set"
+  require "yaml"
+
+  operator = "{{operator}}"
+  cfg = YAML.load_file("operators.yaml").fetch("operators").fetch(operator)
+  exclude_asn = cfg.fetch("exclude_asn", []).map(&:to_s).to_set
+  candidate_asns = IO.popen(["just", "get_asn_candidates_raw", operator], &:read).split
+  abort("Failed to get raw ASN candidates for #{operator}") unless $?.success?
+
+  if cfg.fetch("exclude_foreign_upstream_only", false) && !candidate_asns.empty?
+    ribs = Dir["rib-*.{gz,bz2}"].sort
+    abort("No rib-*.gz or rib-*.bz2 files found. Run 'just prepare_ribs' first.") if ribs.empty?
+    bgptools = [
+      "bgptools",
+      "--ignore-private-asn",
+      "--cache",
+      "--origin-only",
+      "--exclude-foreign-upstream-only",
+      cfg.fetch("country"),
+      "--asn-country-file",
+      "asnames.txt",
+      "--debug-print-foreign-upstream-only-asns",
+    ]
+    bgptools += ribs.flat_map { |rib| ["--mrt-file", rib] }
+    dynamic_exclude_asn = IO.popen(bgptools + candidate_asns, &:read)
+    abort("Failed to compute foreign-upstream-only ASN list for #{operator}") unless $?.success?
+    exclude_asn.merge(dynamic_exclude_asn.split)
+  end
+
+  candidate_asns.each do |asn|
+    puts asn unless exclude_asn.include?(asn)
+  end
+
+# Print dynamically excluded ASNs whose direct upstreams are all foreign
+foreign_upstream_only_asn operator:
+  #!/usr/bin/env ruby
+  require "yaml"
+
+  operator = "{{operator}}"
+  cfg = YAML.load_file("operators.yaml").fetch("operators").fetch(operator)
+  abort("foreign_upstream_only_asn is disabled for #{operator}") unless cfg.fetch("exclude_foreign_upstream_only", false)
+
+  candidate_asns = IO.popen(["just", "get_asn_candidates_raw", operator], &:read).split
+  abort("Failed to get raw ASN candidates for #{operator}") unless $?.success?
+  exit 0 if candidate_asns.empty?
+
+  ribs = Dir["rib-*.{gz,bz2}"].sort
+  abort("No rib-*.gz or rib-*.bz2 files found. Run 'just prepare_ribs' first.") if ribs.empty?
+  bgptools = [
+    "bgptools",
+    "--ignore-private-asn",
+    "--cache",
+    "--origin-only",
+    "--exclude-foreign-upstream-only",
+    cfg.fetch("country"),
+    "--asn-country-file",
+    "asnames.txt",
+    "--debug-print-foreign-upstream-only-asns",
+  ]
+  bgptools += ribs.flat_map { |rib| ["--mrt-file", rib] }
+  abort("Failed to compute foreign-upstream-only ASN list for #{operator}") unless system(*bgptools, *candidate_asns)
+
+# Refresh the Markdown report for the dynamic foreign-upstream exclusion rule
+report_foreign_upstream_only_asn operator:
+  #!/usr/bin/env ruby
+  require "fileutils"
+  require "set"
+  require "yaml"
+
+  operator = "{{operator}}"
+  cfg = YAML.load_file("operators.yaml").fetch("operators").fetch(operator)
+  exclude_asn = cfg.fetch("exclude_asn", []).map(&:to_s).to_set
+  matched = IO.popen(["just", "foreign_upstream_only_asn", operator], &:read).split.to_set
+  abort("Failed to compute foreign-upstream-only ASN list for #{operator}") unless $?.success?
+
+  covered_by_dynamic = (exclude_asn & matched).to_a.sort
+  not_matched = (exclude_asn - matched).to_a.sort
+  dynamic_only = (matched - exclude_asn).to_a.sort
+  all_matched = matched.to_a.sort
+  candidate_count = IO.popen(["just", "get_asn_candidates_raw", operator], &:read).split.length
+  abort("Failed to get raw ASN candidates for #{operator}") unless $?.success?
+
+  lines = []
+  lines << "# Foreign-Upstream-Only ASN Report"
+  lines << ""
+  lines << "- Operator: `#{operator}`"
+  lines << "- Country: `#{cfg.fetch("country")}`"
+  lines << "- Candidate ASNs: `#{candidate_count}`"
+  lines << "- Dynamically filtered ASNs: `#{all_matched.size}`"
+  lines << "- Static `exclude_asn` entries: `#{exclude_asn.size}`"
+  lines << "- Static `exclude_asn` entries still needed: `#{not_matched.size}`"
+  lines << "- Static `exclude_asn` entries already covered by dynamic filtering: `#{covered_by_dynamic.size}`"
+  lines << "- Dynamic-only ASNs: `#{dynamic_only.size}`"
+  lines << ""
+  lines << "Rule:"
+  lines << "- Candidate ASNs come from `operators.yaml` + `asnames.txt`."
+  lines << "- Only the direct upstream ASN adjacent to the origin in AS_PATH is considered."
+  lines << "- An ASN matches only when at least one direct upstream is observed and every observed direct upstream has a known country that is not `#{cfg.fetch("country")}`."
+  lines << ""
+  lines << "## Static `exclude_asn` Entries Still Needed"
+  lines << ""
+  not_matched.each { |asn| lines << "- `#{asn}`" }
+  lines << ""
+  lines << "## Static `exclude_asn` Entries Covered By Dynamic Filtering"
+  lines << ""
+  if covered_by_dynamic.empty?
+    lines << "- None"
+  else
+    covered_by_dynamic.each { |asn| lines << "- `#{asn}`" }
+  end
+  lines << ""
+  lines << "## Dynamic-Only ASNs"
+  lines << ""
+  dynamic_only.each { |asn| lines << "- `#{asn}`" }
+  lines << ""
+  lines << "## All Dynamically Filtered ASNs"
+  lines << ""
+  all_matched.each { |asn| lines << "- `#{asn}`" }
+
+  FileUtils.mkdir_p("analysis")
+  File.write("analysis/#{operator}-foreign-upstream-only-asn.md", lines.join("\n"))
 
 # Generate IP lists for a single operator
 gen operator:
