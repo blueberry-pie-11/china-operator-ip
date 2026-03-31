@@ -7,6 +7,12 @@ on:
     branches: [ '*' ]
 
   workflow_dispatch:
+    inputs:
+      update_ip_lists:
+        description: Update the ip-lists branch after a successful build
+        type: boolean
+        required: true
+        default: true
   schedule:
     - cron: '45 2 * * *'
 
@@ -31,12 +37,23 @@ jobs:
       - run: just guard
       - name: Checkout ip-lists branch
         uses: actions/checkout@v6
-        if: github.event_name == 'schedule' && github.ref == 'refs/heads/master'
+        if: |
+          github.ref == 'refs/heads/master' && (
+            github.event_name == 'schedule' ||
+            (github.event_name == 'workflow_dispatch' && inputs.update_ip_lists)
+          )
         with:
           ref: ip-lists
           path: ip-lists
       - run: just upload
-        if: github.event_name == 'schedule' && github.ref == 'refs/heads/master'
+        if: |
+          github.ref == 'refs/heads/master' && (
+            github.event_name == 'schedule' ||
+            (github.event_name == 'workflow_dispatch' && inputs.update_ip_lists)
+          )
       - run: just refresh_jsdelivr ${{ github.repository }}
-        if: github.event_name == 'schedule' && github.ref == 'refs/heads/master'
-
+        if: |
+          github.ref == 'refs/heads/master' && (
+            github.event_name == 'schedule' ||
+            (github.event_name == 'workflow_dispatch' && inputs.update_ip_lists)
+          )
