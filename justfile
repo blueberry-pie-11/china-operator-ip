@@ -260,8 +260,8 @@ stat:
 upload: guard
   #!/usr/bin/env bash
   set -euo pipefail
-  rm -f ip-lists/*.txt
-  mv result/* ip-lists
+  rm -f ip-lists/{.,}*.txt
+  mv result/{*,.*.txt} ip-lists
   cd ip-lists
   tree -H . -P "*.txt|stat" -T "China Operator IP - prebuild results" > index.html
   git config user.name "GitHub Actions"
