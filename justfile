@@ -109,33 +109,28 @@ get_asn_candidates operator:
 # Print ASN list for OPERATOR based on operators.yaml
 get_asn operator:
   #!/usr/bin/env ruby
+  require "fileutils"
   require "set"
   require "yaml"
 
   operator = "{{operator}}"
   cfg = YAML.load_file("operators.yaml").fetch("operators").fetch(operator)
-  exclude_asn = cfg.fetch("exclude_asn", []).map(&:to_s).to_set
-  candidate_asns = IO.popen(["just", "get_asn_candidates_raw", operator], &:read).split
-  abort("Failed to get raw ASN candidates for #{operator}") unless $?.success?
+  candidate_asns = IO.popen(["just", "get_asn_candidates", operator], &:read).split
+  abort("Failed to get ASN candidates for #{operator}") unless $?.success?
+  exclude_asn = Set.new
 
   if cfg.fetch("exclude_foreign_upstream_only", false) && !candidate_asns.empty?
-    ribs = Dir["rib-*.{gz,bz2}"].sort
-    abort("No rib-*.gz or rib-*.bz2 files found. Run 'just prepare_ribs' first.") if ribs.empty?
-    bgptools = [
-      "bgptools",
-      "--ignore-private-asn",
-      "--cache",
-      "--origin-only",
-      "--exclude-foreign-upstream-only",
-      cfg.fetch("country"),
-      "--asn-country-file",
-      "asnames.txt",
-      "--debug-print-foreign-upstream-only-asns",
-    ]
-    bgptools += ribs.flat_map { |rib| ["--mrt-file", rib] }
-    dynamic_exclude_asn = IO.popen(bgptools + candidate_asns, &:read)
-    abort("Failed to compute foreign-upstream-only ASN list for #{operator}") unless $?.success?
-    exclude_asn.merge(dynamic_exclude_asn.split)
+    auto_exclude_path = "result/.#{operator}.auto-exclude.txt"
+
+    if File.file?(auto_exclude_path)
+      exclude_asn.merge(File.read(auto_exclude_path).split)
+    else
+      dynamic_exclude_asn = IO.popen(["just", "foreign_upstream_only_asn", operator], &:read)
+      abort("Failed to compute foreign-upstream-only ASN list for #{operator}") unless $?.success?
+      FileUtils.mkdir_p("result")
+      File.write(auto_exclude_path, dynamic_exclude_asn)
+      exclude_asn.merge(dynamic_exclude_asn.split)
+    end
   end
 
   candidate_asns.each do |asn|
@@ -151,8 +146,8 @@ foreign_upstream_only_asn operator:
   cfg = YAML.load_file("operators.yaml").fetch("operators").fetch(operator)
   abort("foreign_upstream_only_asn is disabled for #{operator}") unless cfg.fetch("exclude_foreign_upstream_only", false)
 
-  candidate_asns = IO.popen(["just", "get_asn_candidates_raw", operator], &:read).split
-  abort("Failed to get raw ASN candidates for #{operator}") unless $?.success?
+  candidate_asns = IO.popen(["just", "get_asn_candidates", operator], &:read).split
+  abort("Failed to get ASN candidates for #{operator}") unless $?.success?
   exit 0 if candidate_asns.empty?
 
   ribs = Dir["rib-*.{gz,bz2}"].sort
@@ -169,7 +164,9 @@ foreign_upstream_only_asn operator:
     "--debug-print-foreign-upstream-only-asns",
   ]
   bgptools += ribs.flat_map { |rib| ["--mrt-file", rib] }
-  abort("Failed to compute foreign-upstream-only ASN list for #{operator}") unless system(*bgptools, *candidate_asns)
+  output = IO.popen(bgptools + candidate_asns, &:read)
+  abort("Failed to compute foreign-upstream-only ASN list for #{operator}") unless $?.success?
+  print output
 
 # Save dynamically excluded ASNs to a hidden file under result/
 save_foreign_upstream_only_asn operator:
@@ -197,6 +194,9 @@ gen operator:
   bgptools += ribs.flat_map { |r| ["--mrt-file", r] }
 
   warn "INFO> #{operator} start"
+  if cfg.fetch("exclude_foreign_upstream_only", false)
+    abort("Failed to save foreign-upstream-only ASN list for #{operator}") unless system("just", "save_foreign_upstream_only_asn", operator)
+  end
   asns = IO.popen(["just", "get_asn", operator], &:read)
   abort("Failed to get ASN list for #{operator}") unless $?.success?
   abort("Failed to run bgptools for #{operator}") unless system(*bgptools, *asns.split, out: out)
@@ -239,6 +239,7 @@ stat:
   ops = YAML.load_file("operators.yaml").fetch("operators")
   ops.each do |operator, cfg|
     next unless cfg.fetch("exclude_foreign_upstream_only", false)
+    next if File.file?("result/.#{operator}.auto-exclude.txt")
     abort("Failed to save foreign-upstream-only ASN list for #{operator}") unless system("just", "save_foreign_upstream_only_asn", operator)
   end
 
